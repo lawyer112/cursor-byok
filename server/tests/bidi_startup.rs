@@ -133,7 +133,34 @@ fn run_request(model_id: String) -> pb::agent_client_message::Message {
 
 #[tokio::test]
 async fn heartbeat_overtaking_initial_upload_does_not_abort_subagent() {
+    exercise_startup(0).await;
+}
+
+#[tokio::test]
+async fn configured_hosted_alias_runs_byok_and_completes() {
+    exercise_startup(1).await;
+}
+
+#[tokio::test]
+async fn model_details_alias_runs_byok_and_completes() {
+    exercise_startup(2).await;
+}
+
+async fn exercise_startup(use_alias: u8) {
     let (_directory, registry, provider, router, model_id) = setup().await;
+    let selected = if use_alias > 0 {
+        registry
+            .store()
+            .set_cursor_model_aliases(std::collections::BTreeMap::from([(
+                "cursor-grok-4.6-high-fast".into(),
+                model_id.clone(),
+            )]))
+            .await
+            .unwrap();
+        "cursor-grok-4.6-high-fast".to_string()
+    } else {
+        model_id.clone()
+    };
     provider.push(vec![
         ModelEvent::Start {
             model_call_id: "child-call".into(),
@@ -145,7 +172,18 @@ async fn heartbeat_overtaking_initial_upload_does_not_abort_subagent() {
     ]);
 
     // Hold the body mid-upload, without a large or timing-dependent fixture.
-    let wire = append_body(0, run_request(model_id));
+    let mut request = run_request(selected.clone());
+    if use_alias == 2 {
+        let pb::agent_client_message::Message::RunRequest(run) = &mut request else {
+            unreachable!()
+        };
+        run.requested_model = None;
+        run.model_details = Some(pb::ModelDetails {
+            model_id: selected,
+            ..Default::default()
+        });
+    }
+    let wire = append_body(0, request);
     let (release, uploaded) = tokio::sync::oneshot::channel();
     let (reading, started) = tokio::sync::oneshot::channel();
     let body = Body::from_stream(async_stream::stream! {
@@ -248,6 +286,7 @@ async fn heartbeat_overtaking_initial_upload_does_not_abort_subagent() {
     assert!(ended);
     assert_eq!(text, "child completed");
     assert_eq!(provider.requests().len(), 1);
+    assert_eq!(provider.requests()[0].model.model_id, model_id);
     let result: (String, i64) = sqlx::query_as(
         "SELECT status, provider_call_index FROM runs WHERE conversation_id = 'startup-child'",
     )
@@ -340,6 +379,53 @@ async fn orphan_followup_times_out_without_creating_a_transport() {
     assert!(std::str::from_utf8(&body)
         .unwrap()
         .contains("timed out waiting for the initial BidiAppend model selection"));
+    assert!(registry.local(REQUEST_ID).await.is_none());
+    assert!(!registry.upstream(REQUEST_ID).await);
+}
+
+#[tokio::test]
+async fn alias_settings_reject_missing_targets_and_reserved_ids() {
+    let (_directory, registry, _provider, _router, model_id) = setup().await;
+    let store = registry.store();
+    assert!(store.cursor_model_aliases().await.unwrap().is_empty());
+    for (alias, target) in [
+        ("cursor-grok", "missing"),
+        ("", model_id.as_str()),
+        ("default", model_id.as_str()),
+        ("plugin:test", model_id.as_str()),
+        (model_id.as_str(), model_id.as_str()),
+    ] {
+        assert!(store
+            .set_cursor_model_aliases(std::collections::BTreeMap::from([(
+                alias.into(),
+                target.into()
+            ),]))
+            .await
+            .is_err());
+    }
+    assert!(store.cursor_model_aliases().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn deleted_alias_target_is_rejected_instead_of_forwarded() {
+    let (_directory, registry, _provider, router, model_id) = setup().await;
+    registry
+        .store()
+        .set_cursor_model_aliases(std::collections::BTreeMap::from([(
+            "cursor-grok".into(),
+            model_id.clone(),
+        )]))
+        .await
+        .unwrap();
+    registry.store().delete_model(&model_id).await.unwrap();
+    let response = router
+        .oneshot(post(
+            APPEND,
+            append_body(0, run_request("cursor-grok".into())),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     assert!(registry.local(REQUEST_ID).await.is_none());
     assert!(!registry.upstream(REQUEST_ID).await);
 }
