@@ -1,0 +1,104 @@
+name: Fork macOS packages
+
+on:
+  push:
+    branches: [build/macos-byok-20260913]
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    name: Package ${{ matrix.arch }}
+    if: github.repository == 'lawyer112/cursor-byok'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            target: aarch64-apple-darwin
+            arch: Apple-Silicon
+            cli_arch: arm64
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            arch: Intel
+            cli_arch: x64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: '. -> target'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+      - name: Check CLI launcher and shell syntax
+        run: |
+          node --test support/cursor-cli/launcher.test.cjs
+          bash -n support/cursor-cli/cursor-byok
+      - name: Install frontend dependencies
+        run: npm ci --prefix apps/desktop
+      - name: Configure independent manual-update build
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          Path('apps/desktop/src-tauri/fork-build.json').write_text(json.dumps({
+            'version': '0.1.7-byok.20260913.1',
+            'bundle': {'createUpdaterArtifacts': False},
+            'plugins': {'updater': {'endpoints': []}}
+          }))
+          PY
+      - name: Build macOS application
+        working-directory: apps/desktop
+        env:
+          APPLE_SIGNING_IDENTITY: '-'
+        run: npm run tauri:build -- --target ${{ matrix.target }} --bundles app --config src-tauri/fork-build.json
+      - name: Check native request path regressions
+        run: cargo test --package cursor-server --test bidi_startup --target ${{ matrix.target }}
+      - name: Verify signature and start the packaged app
+        env:
+          BUILD_TARGET: ${{ matrix.target }}
+        run: |
+          app="target/$BUILD_TARGET/release/bundle/macos/Cursor BYOK.app"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          file "$app/Contents/MacOS/cursor-byok-desktop"
+          "$app/Contents/MacOS/cursor-byok-desktop" > "$RUNNER_TEMP/byok-startup.log" 2>&1 &
+          app_pid=$!
+          trap 'kill "$app_pid" 2>/dev/null || true' EXIT
+          python3 .github/scripts/fork-macos-smoke.py
+      - name: Verify official Mac CLI startup through launcher
+        env:
+          CLI_ARCH: ${{ matrix.cli_arch }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/official-cli"
+          curl -fSL --retry 3 "https://downloads.cursor.com/lab/2026.09.10-fd3934a/darwin/$CLI_ARCH/agent-cli-package.tar.gz" -o "$RUNNER_TEMP/official-cli.tar.gz"
+          tar -xzf "$RUNNER_TEMP/official-cli.tar.gz" --strip-components=1 -C "$RUNNER_TEMP/official-cli"
+          "$RUNNER_TEMP/official-cli/node" .github/scripts/fork-cli-smoke.cjs "$RUNNER_TEMP/official-cli"
+      - name: Create download packages
+        env:
+          BUILD_TARGET: ${{ matrix.target }}
+          ARCH_LABEL: ${{ matrix.arch }}
+        run: |
+          mkdir -p package/Cursor-CLI downloads
+          ditto "target/$BUILD_TARGET/release/bundle/macos/Cursor BYOK.app" 'package/Cursor BYOK.app'
+          cp support/cursor-cli/cursor-byok support/cursor-cli/launcher.cjs support/cursor-cli/README.md package/Cursor-CLI/
+          cp .github/release-notes/macos-install-zh.md package/安装说明.md
+          printf '%s\n' "$GITHUB_SHA" > package/SOURCE-COMMIT.txt
+          ln -s /Applications package/Applications
+          hdiutil create -volname 'Cursor BYOK Custom' -srcfolder package -ov -format UDZO "downloads/Cursor-BYOK-0.1.7-byok.20260913.1-macOS-$ARCH_LABEL.dmg"
+          tar -czf "downloads/Cursor-BYOK-0.1.7-byok.20260913.1-macOS-$ARCH_LABEL.tar.gz" -C package 'Cursor BYOK.app' Cursor-CLI 安装说明.md SOURCE-COMMIT.txt
+          (cd downloads && shasum -a 256 *.dmg *.tar.gz > "SHA256-$ARCH_LABEL.txt")
+          hdiutil verify "downloads/Cursor-BYOK-0.1.7-byok.20260913.1-macOS-$ARCH_LABEL.dmg"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macOS-${{ matrix.arch }}
+          path: downloads/*
+          if-no-files-found: error
+          retention-days: 30
