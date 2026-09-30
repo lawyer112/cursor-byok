@@ -97,6 +97,20 @@ See the [release roadmap](https://github.com/leookun/cursor-byok/discussions/32)
 
 Issues and pull requests are welcome. See the [Contributing Guide](./CONTRIBUTING_EN.md) for prerequisites, build commands, project structure, and contribution guidelines.
 
+### Build a standalone desktop executable
+
+From the repository root, with Node.js, Rust, and the platform's Tauri prerequisites installed:
+
+```sh
+cd apps/desktop
+npm ci
+npm run tauri:build -- --no-bundle --ci -- --locked
+```
+
+The Tauri build command builds and embeds the frontend and enables its production asset path. A bare `cargo build --release -p cursor-byok-desktop` still selects the development frontend proxy and requires Vite on port 1420; without it, the management window displays `frontend development server is unavailable`.
+
+Before deploying the executable, verify that its management window opens with the development server stopped and that the embedded HTML, JavaScript, and CSS load successfully. The local gateway can serve Agent requests even when the management frontend is unavailable.
+
 ## Contributors
 
 <a href="https://github.com/leookun/cursor-byok/graphs/contributors">
