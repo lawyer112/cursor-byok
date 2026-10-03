@@ -54,6 +54,10 @@ For complete installation steps, system configuration, and Frequently Asked Ques
 
 Model configurations support both OpenAI and Anthropic API protocols. Each model channel can independently define its context window, maximum output tokens, reasoning effort, custom headers, and additional request parameters.
 
+For DeepSeek tool conversations, select **Chat Completions API** when a gateway's Responses conversion returns HTTP 400 after successful tool calls. This keeps reasoning enabled. The Chat adapter preserves DeepSeek's plain reasoning when continuing a conversation previously routed through Responses, and sends an explicit empty reasoning string for a tool turn that produced no reasoning. See the [DeepSeek thinking-mode requirements](https://api-docs.deepseek.com/guides/thinking_mode/).
+
+Changing the protocol changes the configured model ID exposed to Cursor. Select the saved model again in the conversation, then verify an Agent task that reads a file and uses its result; a connectivity test alone does not verify tool-result continuation.
+
 ![cursor-byok model settings](./images/en-model-1.png)
 
 ## How It Works
